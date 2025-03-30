@@ -1,0 +1,3 @@
+[workspace]
+members = ["common", "websocket-server", "web-server"]
+resolver = "2"
