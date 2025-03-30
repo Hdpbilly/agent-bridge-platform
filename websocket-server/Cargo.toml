@@ -3,7 +3,7 @@ name = "websocket-server"
 version = "0.1.0"
 edition = "2021"
 description = "WebSocket server for Agent Bridge Platform"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["Hdpbilly"]
 
 [dependencies]
 common = { path = "../common" }
@@ -11,8 +11,12 @@ actix = "0.13"
 actix-web = "4"
 actix-web-actors = "4"
 tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 dashmap = "5"
+futures = "0.3"
+async-trait = "0.1"
+thiserror = "1.0"
