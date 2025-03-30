@@ -3,7 +3,7 @@ name = "web-server"
 version = "0.1.0"
 edition = "2021"
 description = "Web server for Agent Bridge Platform"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["Hdpbilly"]
 
 [dependencies]
 common = { path = "../common" }
