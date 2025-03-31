@@ -1,27 +1,24 @@
-// WebSocket Server - actors/client_session_actor.rs
 // websocket-server/src/actors/client_session_actor.rs
 use actix::{Actor, ActorContext, AsyncContext, StreamHandler, Addr, Context, Handler};
 use actix_web_actors::ws;
 use common::{ClientMessage, SystemMessage};
 use uuid::Uuid;
 use std::time::{Duration, Instant};
-use super::state_manager::{StateManagerActor, UnregisterClient};
+use super::state_manager::{
+    StateManagerActor, UnregisterClient, ConnectionState, 
+    UpdateClientState, ClientActivity
+};
 use super::router_actor::ClientActorMessage;
 
-// Connection state tracking
-enum ConnectionState {
-    Connected,
-    Disconnected,
-}
-
-/// Enhanced actor managing a client WebSocket connection
+// Enhanced client session actor
 pub struct ClientSessionActor {
     client_id: Uuid,
     authenticated: bool,
     wallet_address: Option<String>,
-    state: ConnectionState,
-    last_heartbeat: Instant,
     state_manager: Option<Addr<StateManagerActor>>,
+    last_heartbeat: Instant,
+    heartbeat_interval: Duration,
+    heartbeat_timeout: Duration,
     message_buffer: Vec<String>,
 }
 
@@ -31,9 +28,10 @@ impl ClientSessionActor {
             client_id,
             authenticated: false,
             wallet_address: None,
-            state: ConnectionState::Connected,
-            last_heartbeat: Instant::now(),
             state_manager: None,
+            last_heartbeat: Instant::now(),
+            heartbeat_interval: Duration::from_secs(5),
+            heartbeat_timeout: Duration::from_secs(30),
             message_buffer: Vec::new(),
         }
     }
@@ -43,9 +41,10 @@ impl ClientSessionActor {
             client_id,
             authenticated: true,
             wallet_address: Some(wallet_address),
-            state: ConnectionState::Connected,
-            last_heartbeat: Instant::now(),
             state_manager: None,
+            last_heartbeat: Instant::now(),
+            heartbeat_interval: Duration::from_secs(5),
+            heartbeat_timeout: Duration::from_secs(30),
             message_buffer: Vec::new(),
         }
     }
@@ -57,16 +56,21 @@ impl ClientSessionActor {
     
     // Enhanced heartbeat with timeout detection
     fn heartbeat(&self, ctx: &mut ws::WebsocketContext<Self>) {
-        ctx.run_interval(Duration::from_secs(5), |act, ctx| {
-            // Check for heartbeat timeout (30 seconds)
-            if Instant::now().duration_since(act.last_heartbeat) > Duration::from_secs(30) {
+        ctx.run_interval(self.heartbeat_interval, |act, ctx| {
+            // Check for heartbeat timeout
+            if Instant::now().duration_since(act.last_heartbeat) > act.heartbeat_timeout {
                 tracing::warn!("Client heartbeat timeout: {}", act.client_id);
                 
-                // Update the state to disconnected
-                act.state = ConnectionState::Disconnected;
-                
-                // Notify state manager about disconnection
+                // Update state manager
                 if let Some(state_manager) = &act.state_manager {
+                    // Update to disconnected state
+                    state_manager.do_send(UpdateClientState {
+                        client_id: act.client_id,
+                        state: ConnectionState::Disconnected,
+                        last_seen_update: true,
+                    });
+                    
+                    // Unregister from state manager
                     state_manager.do_send(UnregisterClient {
                         client_id: act.client_id,
                     });
@@ -103,6 +107,16 @@ impl ClientSessionActor {
             }
         }
     }
+    
+    // Update activity with state manager
+    fn update_activity(&self, is_message: bool) {
+        if let Some(state_manager) = &self.state_manager {
+            state_manager.do_send(ClientActivity {
+                client_id: self.client_id,
+                is_message,
+            });
+        }
+    }
 }
 
 impl Actor for ClientSessionActor {
@@ -111,8 +125,7 @@ impl Actor for ClientSessionActor {
     fn started(&mut self, ctx: &mut Self::Context) {
         tracing::info!("Client connected: {}", self.client_id);
         
-        // Reset state
-        self.state = ConnectionState::Connected;
+        // Reset heartbeat
         self.last_heartbeat = Instant::now();
         
         // Setup heartbeat
@@ -120,37 +133,23 @@ impl Actor for ClientSessionActor {
         
         // Send any buffered messages
         self.send_buffered_messages(ctx);
-        
-        // Notify about client connection through system message
-        // This would normally go to the router in a full implementation
-        let system_msg = SystemMessage::ClientConnected {
-            client_id: self.client_id,
-            authenticated: self.authenticated,
-            wallet_address: self.wallet_address.clone(),
-        };
-        
-        tracing::info!("Client connection system message: {:?}", system_msg);
     }
     
     fn stopped(&mut self, _ctx: &mut Self::Context) {
         tracing::info!("Client disconnected: {}", self.client_id);
         
-        // Update state
-        self.state = ConnectionState::Disconnected;
-        
         // Notify state manager about disconnection (if not already done in heartbeat)
         if let Some(state_manager) = &self.state_manager {
+            state_manager.do_send(UpdateClientState {
+                client_id: self.client_id,
+                state: ConnectionState::Disconnected,
+                last_seen_update: true,
+            });
+            
             state_manager.do_send(UnregisterClient {
                 client_id: self.client_id,
             });
         }
-        
-        // Notify about client disconnection through system message
-        let system_msg = SystemMessage::ClientDisconnected {
-            client_id: self.client_id,
-        };
-        
-        tracing::info!("Client disconnection system message: {:?}", system_msg);
     }
 }
 
@@ -161,19 +160,28 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for ClientSessionActo
                 // Update last heartbeat time
                 self.last_heartbeat = Instant::now();
                 ctx.pong(&msg);
+                
+                // Update activity (not a message)
+                self.update_activity(false);
             },
             Ok(ws::Message::Pong(_)) => {
                 // Update last heartbeat time on pong response
                 self.last_heartbeat = Instant::now();
+                
+                // Update activity (not a message)
+                self.update_activity(false);
             },
             Ok(ws::Message::Text(text)) => {
                 // Update last heartbeat time on any message
                 self.last_heartbeat = Instant::now();
                 
+                // Update activity (is a message)
+                self.update_activity(true);
+                
                 // Process client message
                 tracing::info!("Received message from client {}: {}", self.client_id, text);
                 
-                // For Phase 2, create a ClientMessage and route to the agent
+                // Create a ClientMessage
                 let client_msg = ClientMessage {
                     client_id: self.client_id,
                     content: text.to_string(),
@@ -195,11 +203,54 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for ClientSessionActo
                     }
                 }
             },
+            Ok(ws::Message::Binary(_)) => {
+                // Update last heartbeat time
+                self.last_heartbeat = Instant::now();
+                
+                // Update activity (is a message)
+                self.update_activity(true);
+                
+                // Binary messages not supported in Phase 2
+                ctx.text("Binary messages not supported");
+            },
             Ok(ws::Message::Close(reason)) => {
                 tracing::info!("Client closing connection: {:?}", reason);
+                
+                // Update state manager
+                if let Some(state_manager) = &self.state_manager {
+                    state_manager.do_send(UpdateClientState {
+                        client_id: self.client_id,
+                        state: ConnectionState::Disconnected,
+                        last_seen_update: true,
+                    });
+                }
+                
                 ctx.close(reason);
             },
-            _ => (),
+            // Add handlers for the missing message types
+            Ok(ws::Message::Continuation(_)) => {
+                // Actix-web handles continuations automatically for most use cases
+                // Just update heartbeat and log at trace level
+                self.last_heartbeat = Instant::now();
+                tracing::trace!("Received continuation frame from client {}", self.client_id);
+            },
+            Ok(ws::Message::Nop) => {
+                // No operation - update heartbeat but otherwise ignore
+                self.last_heartbeat = Instant::now();
+                tracing::trace!("Received nop frame from client {}", self.client_id);
+            },
+            Err(e) => {
+                tracing::error!("WebSocket protocol error from client {}: {}", self.client_id, e);
+                
+                // Update state manager on error
+                if let Some(state_manager) = &self.state_manager {
+                    state_manager.do_send(UpdateClientState {
+                        client_id: self.client_id,
+                        state: ConnectionState::Error,
+                        last_seen_update: true,
+                    });
+                }
+            }
         }
     }
 }
@@ -208,7 +259,7 @@ impl Handler<ClientActorMessage> for ClientSessionActor {
     type Result = ();
     
     fn handle(&mut self, msg: ClientActorMessage, ctx: &mut Self::Context) -> Self::Result {
-        // Simply forward the message to the client
+        // Forward the message to the client
         ctx.text(msg.content);
     }
 }

@@ -4,35 +4,23 @@ use uuid::Uuid;
 use dashmap::DashMap;
 use super::client_session_actor::ClientSessionActor;
 use super::agent_actor::AgentActor;
-use common::{ClientMessage, AgentMessage};
+use common::{ClientMessage, AgentMessage, SystemMessage};
 
-// Define specific message types for different actors
-
-// Message to send to a ClientSessionActor
+// Message to send to a ClientSessionActor - actor-specific, so kept here
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct ClientActorMessage {
     pub content: String,
 }
 
-// Message to send to an AgentActor
+// Message to send to an AgentActor - actor-specific, so kept here
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct AgentActorMessage {
     pub content: String,
 }
 
-/// Enhanced message for routing with reconnection support
-#[derive(Message)]
-#[rtype(result = "()")]
-pub struct RouteMessage {
-    pub message: String,
-    pub from_client_id: Option<Uuid>,
-    pub to_client_id: Option<Uuid>, // None means broadcast
-    pub require_delivery: bool,     // If true, buffer for disconnected recipients
-}
-
-/// Message for client registration
+// Registration message types - actor-specific, so kept here
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct RegisterClient {
@@ -40,14 +28,12 @@ pub struct RegisterClient {
     pub addr: Addr<ClientSessionActor>,
 }
 
-/// Message for client unregistration
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct UnregisterClient {
     pub client_id: Uuid,
 }
 
-/// Message for agent registration
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct RegisterAgent {
@@ -55,17 +41,17 @@ pub struct RegisterAgent {
     pub addr: Addr<AgentActor>,
 }
 
-/// Message for agent unregistration
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct UnregisterAgent {
     pub agent_id: String,
 }
 
-/// Enhanced router actor with client/agent lookup
+// Router actor for message routing
 pub struct RouterActor {
     clients: DashMap<Uuid, Addr<ClientSessionActor>>,
     agents: DashMap<String, Addr<AgentActor>>,
+    default_agent_id: Option<String>, // Default agent for Phase 2
 }
 
 impl RouterActor {
@@ -73,122 +59,188 @@ impl RouterActor {
         Self {
             clients: DashMap::new(),
             agents: DashMap::new(),
+            default_agent_id: Some("agent1".to_string()), // Hardcoded for Phase 2
         }
     }
     
     // Register client address
     pub fn register_client(&self, client_id: Uuid, addr: Addr<ClientSessionActor>) {
         self.clients.insert(client_id, addr);
+        tracing::info!("Client registered with router: {}", client_id);
     }
     
     // Unregister client
     pub fn unregister_client(&self, client_id: &Uuid) {
         self.clients.remove(client_id);
+        tracing::info!("Client unregistered from router: {}", client_id);
     }
     
     // Register agent address
     pub fn register_agent(&self, agent_id: String, addr: Addr<AgentActor>) {
-        self.agents.insert(agent_id, addr);
+        self.agents.insert(agent_id.clone(), addr);
+        tracing::info!("Agent registered with router: {}", agent_id);
     }
     
     // Unregister agent
     pub fn unregister_agent(&self, agent_id: &str) {
         self.agents.remove(agent_id);
+        tracing::info!("Agent unregistered from router: {}", agent_id);
+    }
+    
+    // Get the default agent for Phase 2
+    fn get_default_agent(&self) -> Option<Addr<AgentActor>> {
+        if let Some(id) = &self.default_agent_id {
+            if let Some(entry) = self.agents.get(id) {
+                return Some(entry.value().clone());
+            }
+        }
+        None
     }
 }
 
 impl Actor for RouterActor {
     type Context = Context<Self>;
+    
+    fn started(&mut self, _ctx: &mut Self::Context) {
+        tracing::info!("RouterActor started");
+    }
+    
+    fn stopped(&mut self, _ctx: &mut Self::Context) {
+        tracing::info!("RouterActor stopped");
+    }
 }
 
-impl Handler<RouteMessage> for RouterActor {
+// Handle ClientMessage directly
+impl Handler<ClientMessage> for RouterActor {
     type Result = ();
     
-    fn handle(&mut self, msg: RouteMessage, _ctx: &mut Self::Context) -> Self::Result {
-        match (msg.from_client_id, msg.to_client_id) {
-            (Some(from), None) => {
-                // Client to Agent (broadcast)
-                tracing::info!("Routing message from client {} to agent", from);
-                
-                // In Phase 2, we route to all agents
-                for agent_entry in self.agents.iter() {
-                    let agent_addr = agent_entry.value();
+    fn handle(&mut self, msg: ClientMessage, _ctx: &mut Self::Context) -> Self::Result {
+        tracing::info!("Routing client message from {}", msg.client_id);
+        
+        // In Phase 2, we route to the default agent if available
+        if let Some(default_agent) = self.get_default_agent() {
+            match serde_json::to_string(&msg) {
+                Ok(content) => {
+                    let agent_message = AgentActorMessage { content };
                     
-                    // Parse as ClientMessage
-                    if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&msg.message) {
-                        // Forward to agent using proper message type
-                        let agent_message = AgentActorMessage {
-                            content: serde_json::to_string(&client_msg).unwrap_or_default(),
-                        };
-                        
-                        // Use do_send which doesn't require response handling
-                        agent_addr.do_send(agent_message);
+                    if let Err(e) = default_agent.try_send(agent_message) {
+                        tracing::error!("Failed to send message to default agent: {}", e);
+                    }
+                },
+                Err(e) => tracing::error!("Failed to serialize client message: {}", e)
+            }
+        } else {
+            // Try each agent if no default is set
+            let mut sent = false;
+            
+            for agent_entry in self.agents.iter() {
+                if let Ok(content) = serde_json::to_string(&msg) {
+                    let agent_message = AgentActorMessage { content };
+                    
+                    if agent_entry.value().try_send(agent_message).is_ok() {
+                        sent = true;
                     }
                 }
-            },
-            (None, Some(to)) => {
-                // Agent to specific client
-                tracing::info!("Routing message from agent to client {}", to);
+            }
+            
+            if !sent {
+                tracing::warn!("No agents available to receive message from client {}", msg.client_id);
+            }
+        }
+    }
+}
+
+// Handle AgentMessage directly
+impl Handler<AgentMessage> for RouterActor {
+    type Result = ();
+    
+    fn handle(&mut self, msg: AgentMessage, _ctx: &mut Self::Context) -> Self::Result {
+        match msg.target_client_id {
+            Some(client_id) => {
+                // Direct message to specific client
+                tracing::info!("Routing agent message to client {}", client_id);
                 
-                // Look up client
-                if let Some(client_entry) = self.clients.get(&to) {
-                    let client_addr = client_entry.value();
-                    
-                    // Forward message directly with proper message type
-                    let client_message = ClientActorMessage {
-                        content: msg.message.clone(),
-                    };
-                    
-                    client_addr.do_send(client_message);
-                } else if msg.require_delivery {
-                    // Client not connected but delivery required
-                    // In a full implementation, we would buffer in a persistent store
-                    tracing::warn!("Client {} not connected, message buffering not implemented", to);
+                if let Some(client_entry) = self.clients.get(&client_id) {
+                    if let Ok(content) = serde_json::to_string(&msg) {
+                        let client_message = ClientActorMessage { content };
+                        
+                        if let Err(e) = client_entry.value().try_send(client_message) {
+                            tracing::error!("Failed to deliver message to client {}: {}", client_id, e);
+                        } else {
+                            tracing::debug!("Message delivered to client {}", client_id);
+                        }
+                    } else {
+                        tracing::error!("Failed to serialize agent message for client {}", client_id);
+                    }
+                } else {
+                    tracing::warn!("Client {} not found for message delivery", client_id);
                 }
             },
-            (None, None) => {
-                // Agent broadcast to all clients
-                tracing::info!("Broadcasting message from agent to all clients");
+            None => {
+                // Broadcast to all clients
+                tracing::info!("Broadcasting agent message to all clients");
                 
-                // Parse as AgentMessage
-                if let Ok(agent_msg) = serde_json::from_str::<AgentMessage>(&msg.message) {
-                    // Broadcast to all clients
+                if let Ok(content) = serde_json::to_string(&msg) {
+                    let mut sent_count = 0;
+                    let total_count = self.clients.len();
+                    
                     for client_entry in self.clients.iter() {
-                        let client_addr = client_entry.value();
+                        let client_message = ClientActorMessage { content: content.clone() };
                         
-                        // Use proper message type
-                        let client_message = ClientActorMessage {
-                            content: serde_json::to_string(&agent_msg).unwrap_or_default(),
-                        };
-                        
-                        client_addr.do_send(client_message);
+                        if client_entry.value().try_send(client_message).is_ok() {
+                            sent_count += 1;
+                        }
                     }
-                }
-            },
-            (Some(from), Some(to)) => {
-                // Client to specific client (now supported in Phase 2)
-                tracing::info!("Routing message from client {} to client {}", from, to);
-                
-                // Look up target client
-                if let Some(client_entry) = self.clients.get(&to) {
-                    let client_addr = client_entry.value();
                     
-                    // Forward message directly with proper message type
-                    let client_message = ClientActorMessage {
-                        content: msg.message.clone(),
-                    };
-                    
-                    client_addr.do_send(client_message);
-                } else if msg.require_delivery {
-                    // Client not connected but delivery required
-                    tracing::warn!("Target client {} not connected, message buffering not implemented", to);
+                    tracing::info!("Broadcast delivered to {}/{} clients", sent_count, total_count);
+                } else {
+                    tracing::error!("Failed to serialize agent broadcast message");
                 }
             }
         }
     }
 }
 
-// Implement handlers for client/agent registration
+// Handle SystemMessage
+impl Handler<SystemMessage> for RouterActor {
+    type Result = ();
+    
+    fn handle(&mut self, msg: SystemMessage, _ctx: &mut Self::Context) -> Self::Result {
+        match &msg {
+            SystemMessage::ClientConnected { client_id, authenticated, wallet_address } => {
+                tracing::info!(
+                    "System message: Client connected - ID: {}, Authenticated: {}", 
+                    client_id, authenticated
+                );
+                
+                // Notify agents about client connection
+                if let Some(default_agent) = self.get_default_agent() {
+                    if let Ok(content) = serde_json::to_string(&msg) {
+                        let agent_message = AgentActorMessage { content };
+                        let _ = default_agent.try_send(agent_message);
+                    }
+                }
+            },
+            SystemMessage::ClientDisconnected { client_id } => {
+                tracing::info!("System message: Client disconnected - ID: {}", client_id);
+                
+                // Notify agents about client disconnection
+                if let Some(default_agent) = self.get_default_agent() {
+                    if let Ok(content) = serde_json::to_string(&msg) {
+                        let agent_message = AgentActorMessage { content };
+                        let _ = default_agent.try_send(agent_message);
+                    }
+                }
+            },
+            _ => {
+                // Handle other system messages
+                tracing::debug!("System message: {:?}", msg);
+            }
+        }
+    }
+}
+
+// Registration handlers
 impl Handler<RegisterClient> for RouterActor {
     type Result = ();
     

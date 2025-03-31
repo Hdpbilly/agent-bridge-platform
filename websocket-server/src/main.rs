@@ -38,11 +38,12 @@ async fn main() -> std::io::Result<()> {
     // Create data references
     let config_data = web::Data::new(config);
     let router_data = web::Data::new(router);
+    let state_manager_data = web::Data::new(state_manager.clone());
     
     // Start HTTP server
     HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(state_manager.clone()))
+            .app_data(state_manager_data.clone())
             .app_data(router_data.clone())
             .app_data(config_data.clone())
             .configure(routes)
