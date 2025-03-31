@@ -1,4 +1,4 @@
-I'll edit the original Agent Bridge Platform architecture document to include the additional requirements for the web server to serve the Sploots web application. Here's the revised version:
+
 
 # Agent Bridge Platform - Architecture & Development Guide
 
