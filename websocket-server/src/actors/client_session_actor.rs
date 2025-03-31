@@ -1,14 +1,14 @@
 // websocket-server/src/actors/client_session_actor.rs
 use actix::{Actor, ActorContext, AsyncContext, StreamHandler, Addr, Context, Handler};
 use actix_web_actors::ws;
-use common::{ClientMessage, SystemMessage};
+use common::{ClientMessage, SystemMessage}; // Assuming you might need SystemMessage later
 use uuid::Uuid;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime}; // Added SystemTime
 use super::state_manager::{
-    StateManagerActor, UnregisterClient, ConnectionState, 
+    StateManagerActor, UnregisterClient, ConnectionState,
     UpdateClientState, ClientActivity
 };
-use super::router_actor::ClientActorMessage;
+use super::router_actor::{ClientActorMessage, RouterActor}; // Import RouterActor
 
 // Enhanced client session actor
 pub struct ClientSessionActor {
@@ -16,6 +16,7 @@ pub struct ClientSessionActor {
     authenticated: bool,
     wallet_address: Option<String>,
     state_manager: Option<Addr<StateManagerActor>>,
+    router: Option<Addr<RouterActor>>, // <-- Add Router Actor Address
     last_heartbeat: Instant,
     heartbeat_interval: Duration,
     heartbeat_timeout: Duration,
@@ -29,86 +30,83 @@ impl ClientSessionActor {
             authenticated: false,
             wallet_address: None,
             state_manager: None,
+            router: None, // <-- Initialize router as None
             last_heartbeat: Instant::now(),
             heartbeat_interval: Duration::from_secs(5),
             heartbeat_timeout: Duration::from_secs(30),
             message_buffer: Vec::new(),
         }
     }
-    
+
+    // (Optional) Keep with_auth if needed, update it too
     pub fn with_auth(client_id: Uuid, wallet_address: String) -> Self {
         Self {
             client_id,
             authenticated: true,
             wallet_address: Some(wallet_address),
             state_manager: None,
+            router: None, // <-- Initialize router as None
             last_heartbeat: Instant::now(),
             heartbeat_interval: Duration::from_secs(5),
             heartbeat_timeout: Duration::from_secs(30),
             message_buffer: Vec::new(),
         }
     }
-    
+
     // Set state manager reference
     pub fn set_state_manager(&mut self, addr: Addr<StateManagerActor>) {
         self.state_manager = Some(addr);
     }
-    
-    // Enhanced heartbeat with timeout detection
+
+    // Set router reference <-- Add this method
+    pub fn set_router(&mut self, addr: Addr<RouterActor>) {
+        self.router = Some(addr);
+    }
+
+    // Enhanced heartbeat (no changes needed here for routing)
     fn heartbeat(&self, ctx: &mut ws::WebsocketContext<Self>) {
         ctx.run_interval(self.heartbeat_interval, |act, ctx| {
-            // Check for heartbeat timeout
             if Instant::now().duration_since(act.last_heartbeat) > act.heartbeat_timeout {
                 tracing::warn!("Client heartbeat timeout: {}", act.client_id);
-                
-                // Update state manager
+
                 if let Some(state_manager) = &act.state_manager {
-                    // Update to disconnected state
                     state_manager.do_send(UpdateClientState {
                         client_id: act.client_id,
                         state: ConnectionState::Disconnected,
                         last_seen_update: true,
                     });
-                    
-                    // Unregister from state manager
                     state_manager.do_send(UnregisterClient {
                         client_id: act.client_id,
                     });
                 }
-                
-                // Stop actor
                 ctx.stop();
                 return;
             }
-            
-            // Send ping
             ctx.ping(b"");
         });
     }
-    
-    // Buffer a message for later delivery
+
+    // (No changes needed for buffer_message or send_buffered_messages)
     pub fn buffer_message(&mut self, message: String) {
-        // Limit buffer size to 100 messages
         if self.message_buffer.len() < 100 {
             self.message_buffer.push(message);
         } else {
             tracing::warn!("Message buffer full for client: {}, dropping message", self.client_id);
         }
     }
-    
-    // Send buffered messages
+
     fn send_buffered_messages(&mut self, ctx: &mut ws::WebsocketContext<Self>) {
         if !self.message_buffer.is_empty() {
-            tracing::info!("Sending {} buffered messages for client: {}", 
+            tracing::info!("Sending {} buffered messages for client: {}",
                           self.message_buffer.len(), self.client_id);
-                          
             for msg in self.message_buffer.drain(..) {
                 ctx.text(msg);
             }
         }
     }
-    
-    // Update activity with state manager
+
+
+    // Update activity with state manager (no changes needed here)
     fn update_activity(&self, is_message: bool) {
         if let Some(state_manager) = &self.state_manager {
             state_manager.do_send(ClientActivity {
@@ -121,35 +119,40 @@ impl ClientSessionActor {
 
 impl Actor for ClientSessionActor {
     type Context = ws::WebsocketContext<Self>;
-    
+
     fn started(&mut self, ctx: &mut Self::Context) {
         tracing::info!("Client connected: {}", self.client_id);
-        
-        // Reset heartbeat
         self.last_heartbeat = Instant::now();
-        
-        // Setup heartbeat
         self.heartbeat(ctx);
-        
-        // Send any buffered messages
         self.send_buffered_messages(ctx);
+        // Notify state manager (no changes needed here)
+        if let Some(state_manager) = &self.state_manager {
+             state_manager.do_send(UpdateClientState {
+                 client_id: self.client_id,
+                 state: ConnectionState::Connected, // Assume connected on start
+                 last_seen_update: true,
+             });
+        }
     }
-    
+
     fn stopped(&mut self, _ctx: &mut Self::Context) {
         tracing::info!("Client disconnected: {}", self.client_id);
-        
-        // Notify state manager about disconnection (if not already done in heartbeat)
         if let Some(state_manager) = &self.state_manager {
-            state_manager.do_send(UpdateClientState {
-                client_id: self.client_id,
-                state: ConnectionState::Disconnected,
-                last_seen_update: true,
-            });
-            
-            state_manager.do_send(UnregisterClient {
-                client_id: self.client_id,
-            });
+             state_manager.do_send(UpdateClientState {
+                 client_id: self.client_id,
+                 state: ConnectionState::Disconnected,
+                 last_seen_update: true,
+             });
+             state_manager.do_send(UnregisterClient {
+                 client_id: self.client_id,
+             });
         }
+         // Also unregister from router if router exists
+         if let Some(router) = &self.router {
+             router.do_send(super::router_actor::UnregisterClient {
+                 client_id: self.client_id,
+             });
+         }
     }
 }
 
@@ -157,109 +160,93 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for ClientSessionActo
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         match msg {
             Ok(ws::Message::Ping(msg)) => {
-                // Update last heartbeat time
                 self.last_heartbeat = Instant::now();
-                ctx.pong(&msg);
-                
-                // Update activity (not a message)
                 self.update_activity(false);
+                ctx.pong(&msg);
             },
             Ok(ws::Message::Pong(_)) => {
-                // Update last heartbeat time on pong response
                 self.last_heartbeat = Instant::now();
-                
-                // Update activity (not a message)
                 self.update_activity(false);
             },
             Ok(ws::Message::Text(text)) => {
-                // Update last heartbeat time on any message
                 self.last_heartbeat = Instant::now();
-                
-                // Update activity (is a message)
                 self.update_activity(true);
-                
-                // Process client message
-                tracing::info!("Received message from client {}: {}", self.client_id, text);
-                
-                // Create a ClientMessage
+                tracing::debug!("Received raw message from client {}: {}", self.client_id, text);
+
+                // ---- START ROUTING LOGIC ----
                 let client_msg = ClientMessage {
                     client_id: self.client_id,
                     content: text.to_string(),
                     authenticated: self.authenticated,
                     wallet_address: self.wallet_address.clone(),
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
+                    timestamp: SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs(),
                 };
-                
-                // In a full implementation, this would be sent to the RouterActor
-                // For now, just echo back
-                match serde_json::to_string(&client_msg) {
-                    Ok(json) => ctx.text(json),
-                    Err(e) => {
-                        tracing::error!("Failed to serialize client message: {}", e);
-                        ctx.text(format!("Error: Message serialization failed"));
+
+                if let Some(router) = &self.router {
+                    tracing::info!("Forwarding message from client {} to router", self.client_id);
+                    // Send the parsed ClientMessage to the RouterActor
+                    if let Err(e) = router.try_send(client_msg) {
+                         tracing::error!("Failed to send message to router: {}", e);
+                         // Optionally inform the client about the internal error
+                         ctx.text("Error: Could not process message internally.");
                     }
+                } else {
+                    tracing::error!("Router address not available for client {}", self.client_id);
+                    // Echo back with error if no router is configured (shouldn't happen with proper setup)
+                     ctx.text("Error: Internal routing not configured.");
                 }
+                // ---- END ROUTING LOGIC ----
+
             },
             Ok(ws::Message::Binary(_)) => {
-                // Update last heartbeat time
                 self.last_heartbeat = Instant::now();
-                
-                // Update activity (is a message)
                 self.update_activity(true);
-                
-                // Binary messages not supported in Phase 2
+                tracing::warn!("Binary messages not supported for client: {}", self.client_id);
                 ctx.text("Binary messages not supported");
             },
             Ok(ws::Message::Close(reason)) => {
                 tracing::info!("Client closing connection: {:?}", reason);
-                
-                // Update state manager
                 if let Some(state_manager) = &self.state_manager {
-                    state_manager.do_send(UpdateClientState {
-                        client_id: self.client_id,
-                        state: ConnectionState::Disconnected,
-                        last_seen_update: true,
-                    });
-                }
-                
-                ctx.close(reason);
+                     state_manager.do_send(UpdateClientState {
+                         client_id: self.client_id,
+                         state: ConnectionState::Disconnected,
+                         last_seen_update: true,
+                     });
+                 }
+                ctx.close(reason); // This will trigger stopped()
             },
-            // Add handlers for the missing message types
             Ok(ws::Message::Continuation(_)) => {
-                // Actix-web handles continuations automatically for most use cases
-                // Just update heartbeat and log at trace level
                 self.last_heartbeat = Instant::now();
                 tracing::trace!("Received continuation frame from client {}", self.client_id);
             },
             Ok(ws::Message::Nop) => {
-                // No operation - update heartbeat but otherwise ignore
                 self.last_heartbeat = Instant::now();
                 tracing::trace!("Received nop frame from client {}", self.client_id);
             },
             Err(e) => {
                 tracing::error!("WebSocket protocol error from client {}: {}", self.client_id, e);
-                
-                // Update state manager on error
                 if let Some(state_manager) = &self.state_manager {
-                    state_manager.do_send(UpdateClientState {
-                        client_id: self.client_id,
-                        state: ConnectionState::Error,
-                        last_seen_update: true,
-                    });
-                }
+                     state_manager.do_send(UpdateClientState {
+                         client_id: self.client_id,
+                         state: ConnectionState::Error,
+                         last_seen_update: true,
+                     });
+                 }
+                 ctx.stop(); // Stop actor on protocol error
             }
         }
     }
 }
 
+// Handle messages FROM the router TO this client
 impl Handler<ClientActorMessage> for ClientSessionActor {
     type Result = ();
-    
+
     fn handle(&mut self, msg: ClientActorMessage, ctx: &mut Self::Context) -> Self::Result {
-        // Forward the message to the client
+        tracing::info!("Received message via router for client {}, sending to WebSocket", self.client_id);
         ctx.text(msg.content);
     }
 }
