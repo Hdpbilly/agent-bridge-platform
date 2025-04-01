@@ -243,7 +243,10 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for AgentActor {
                             target_client_id: None, // Or maybe specific client if context known?
                             content: format!("Error: Received malformed message - {}", e),
                             timestamp: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs(),
-                         };
+                            message_id: None, // Optional message ID for tracking
+                            requires_ack: false, // This message doesn't require acknowledgment
+                            message_type: Some("error".to_string()), // Message type classification
+                        };                        
                          if let Ok(json) = serde_json::to_string(&error_response) {
                             // This echoes back, maybe not ideal, consider logging only or specific error channel
                             // ctx.text(json);
@@ -289,5 +292,6 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for AgentActor {
                  ctx.stop(); // Stop actor on protocol error
             }
         }
-    }
+    } 
+
 }
