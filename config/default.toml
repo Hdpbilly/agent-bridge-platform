@@ -1,0 +1,14 @@
+# config/default.toml
+websocket_server_addr = "127.0.0.1:8080"
+web_server_addr = "127.0.0.1:8081"
+agent_token = "dev_token"
+
+[static_files]
+path = ""
+index = "index.html"
+enable_compression = true
+
+[static_files.cache]
+max_age = 3600
+immutable = false
+must_revalidate = true
