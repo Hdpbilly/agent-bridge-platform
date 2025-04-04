@@ -2,18 +2,58 @@
 use actix::{Actor, StreamHandler, AsyncContext, Context, ActorContext, Addr, Message, Handler};
 use actix_web::{web, HttpRequest, HttpResponse, Error};
 use actix_web_actors::ws;
+use dashmap::DashMap;
 use serde::{Serialize, Deserialize};
 use tokio::sync::mpsc;
 use futures::{StreamExt, SinkExt};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 use tokio_tungstenite::tungstenite::protocol::frame::CloseFrame;
 use common::Config;
+use common::models::session::SessionResult;
 use tokio_tungstenite::tungstenite::error::Error as WsError;
 use uuid::Uuid;
 use std::time::{Duration, Instant};
 use std::borrow::Cow;
+use std::sync::Arc;
 use std::convert::TryFrom;
 use tungstenite::protocol::frame::coding::CloseCode as TungsteniteCloseCode;
+
+use crate::client_registry::{ClientRegistryActor, GetClientSession, UpdateSessionActivity};
+
+// Shared state for active WebSocket connections
+pub struct ActiveConnections {
+    // Maps session token to ProxyActor address
+    connections: DashMap<String, Addr<ProxyActor>>,
+}
+
+impl ActiveConnections {
+    pub fn new() -> Self {
+        Self {
+            connections: DashMap::new(),
+        }
+    }
+    
+    // Register a new connection
+    pub fn register(&self, session_token: String, addr: Addr<ProxyActor>) -> Option<Addr<ProxyActor>> {
+        self.connections.insert(session_token, addr)
+    }
+    
+    // Unregister a connection
+    pub fn unregister(&self, session_token: &str) -> bool {
+        self.connections.remove(session_token).is_some()
+    }
+    
+    // Get connection count
+    pub fn count(&self) -> usize {
+        self.connections.len()
+    }
+}
+
+impl Default for ActiveConnections {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // WsMessage types for proxy communication
 #[derive(Message)]
@@ -27,23 +67,40 @@ pub enum ProxyMessage {
     Disconnected,
 }
 
-// Enhanced ProxyActor with real proxying
+// Enhanced ProxyActor with real proxying and session validation
 pub struct ProxyActor {
     client_id: Uuid,
+    session_token: Option<String>,
     ws_sink: Option<mpsc::Sender<WsMessage>>,
     last_heartbeat: Instant,
     reconnect_attempts: u32,
     ws_server_url: String,
+    // Flag to track if we're connected to WebSocket server
+    is_connected_to_server: bool,
+    // Registry for client session validation
+    registry: Option<Addr<ClientRegistryActor>>,
+    // Reference to active connections for unregistering on stop
+    active_connections: Option<web::Data<ActiveConnections>>,
 }
 
 impl ProxyActor {
-    pub fn new(client_id: Uuid, ws_server_url: String) -> Self {
+    pub fn new(
+        client_id: Uuid, 
+        ws_server_url: String, 
+        session_token: Option<String>,
+        registry: Option<Addr<ClientRegistryActor>>,
+        active_connections: Option<web::Data<ActiveConnections>>
+    ) -> Self {
         Self { 
             client_id,
+            session_token,
             ws_sink: None,
             last_heartbeat: Instant::now(),
             reconnect_attempts: 0,
             ws_server_url,
+            is_connected_to_server: false,
+            registry,
+            active_connections,
         }
     }
     
@@ -57,6 +114,7 @@ impl ProxyActor {
                 // Close current connection if it exists
                 if act.ws_sink.is_some() {
                     act.ws_sink = None;
+                    act.is_connected_to_server = false;
                 }
                 
                 // Calculate backoff for reconnection
@@ -155,6 +213,19 @@ impl ProxyActor {
         // Spawn the future
         actix::spawn(fut);
     }
+    
+    // Update session activity
+    fn update_session_activity(&self) {
+        if let Some(session_token) = &self.session_token {
+            if let Some(registry) = &self.registry {
+                let token = session_token.clone();
+                let registry_clone = registry.clone();
+                actix::spawn(async move {
+                    let _ = registry_clone.send(UpdateSessionActivity { session_token: token }).await;
+                });
+            }
+        }
+    }
 }
 
 impl Actor for ProxyActor {
@@ -168,10 +239,28 @@ impl Actor for ProxyActor {
         
         // Connect to WebSocket server
         self.connect_to_ws_server(ctx);
+        self.is_connected_to_server = true;
+        
+        // Register connection with active connections if session token exists
+        if let Some(token) = &self.session_token {
+            if let Some(active_conns) = &self.active_connections {
+                active_conns.register(token.clone(), ctx.address());
+                tracing::info!("Registered connection for session token, active connections: {}", 
+                             active_conns.count());
+            }
+        }
     }
     
     fn stopped(&mut self, _ctx: &mut Self::Context) {
         tracing::info!("Proxy stopped for client: {}", self.client_id);
+        
+        // Unregister from active connections if we have a session token
+        if let Some(session_token) = &self.session_token {
+            if let Some(active_conns) = &self.active_connections {
+                active_conns.unregister(session_token);
+                tracing::debug!("Unregistered from active connections: {}", self.client_id);
+            }
+        }
     }
 }
 
@@ -204,6 +293,9 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for ProxyActor {
                     // Attempt reconnection
                     self.connect_to_ws_server(ctx);
                 }
+                
+                // Update session activity
+                self.update_session_activity();
             },
             Ok(ws::Message::Binary(bin)) => {
                 // Forward binary message to WebSocket server
@@ -230,9 +322,6 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for ProxyActor {
             Ok(ws::Message::Nop) => {
                 // No operation, nothing to do
             },
-            // Ok(ws::Message::Frame(_)) => {
-            //     // Low-level frame, typically not handled directly
-            // },
             Err(e) => {
                 tracing::error!("WebSocket protocol error: {}", e);
             }
@@ -269,6 +358,7 @@ impl Handler<ProxyMessage> for ProxyActor {
                 
                 // Clear sink
                 self.ws_sink = None;
+                self.is_connected_to_server = false;
                 
                 // Attempt reconnection
                 let backoff = std::cmp::min(
@@ -288,20 +378,29 @@ impl Handler<ProxyMessage> for ProxyActor {
     }
 }
 
-// Configure proxy routes - updated for Phase 2
+// Configure proxy routes - updated for session validation
 pub fn configure(cfg: &mut web::ServiceConfig) {
+    // Create shared state for active connections
+    let active_connections = web::Data::new(ActiveConnections::new());
+    
+    // Register the active connections data
+    cfg.app_data(active_connections.clone());
+    
+    // Configure WebSocket route
     cfg.service(
         web::resource("/ws/{client_id}")
             .route(web::get().to(ws_route))
     );
 }
 
-// WebSocket route handler - updated for Phase 2
+// WebSocket route handler - updated for session validation
 async fn ws_route(
     req: HttpRequest,
     stream: web::Payload,
     path: web::Path<(String,)>,
     config: web::Data<Config>,
+    active_connections: web::Data<ActiveConnections>,
+    registry: web::Data<Addr<ClientRegistryActor>>,
 ) -> Result<HttpResponse, Error> {
     // Extract client_id from path
     let client_id_str = &path.0;
@@ -310,11 +409,66 @@ async fn ws_route(
         Err(_) => return Ok(HttpResponse::BadRequest().finish()),
     };
     
+    // Get session token from cookie
+    let session_token = req.cookie("sploots_session").map(|c| c.value().to_string());
+    
+    // Validate session if token is present
+    if let Some(token) = &session_token {
+        match registry.send(GetClientSession { session_token: token.clone() }).await {
+            Ok(SessionResult::Success(session)) => {
+                // Check if client ID matches session
+                if session.client_id != client_id {
+                    tracing::warn!(
+                        "Client ID mismatch: requested {}, session has {}", 
+                        client_id, session.client_id
+                    );
+                    return Ok(HttpResponse::Forbidden().finish());
+                }
+                
+                // Check if another connection exists for this session
+                if let Some(existing_conn) = active_connections.connections.get(token) {
+                    tracing::info!(
+                        "Existing connection found for session {}, closing it", 
+                        session.client_id
+                    );
+                    
+                    // Send close message to existing connection
+                    // This is a policy choice: last connection wins
+                    let _ = existing_conn.send(ProxyMessage::WebSocketClose).await;
+                }
+                
+                tracing::info!("Session validated for client: {}", client_id);
+            },
+            Ok(SessionResult::Expired) => {
+                tracing::warn!("Expired session token for client: {}", client_id);
+                return Ok(HttpResponse::Unauthorized().finish());
+            },
+            Ok(_) => {
+                tracing::warn!("Invalid session token for client: {}", client_id);
+                return Ok(HttpResponse::Unauthorized().finish());
+            },
+            Err(e) => {
+                tracing::error!("Error validating session: {}", e);
+                return Ok(HttpResponse::InternalServerError().finish());
+            }
+        }
+    } else {
+        tracing::warn!("No session token provided for client: {}", client_id);
+        // We could reject unauthenticated connections here, but for now we'll allow them
+        // This is a policy choice and can be changed
+    }
+    
     // Get WebSocket server URL from config
     let ws_server_url = format!("ws://{}", config.websocket_server_addr);
     
-    // Create proxy actor with WebSocket server URL
-    let proxy = ProxyActor::new(client_id, ws_server_url);
+    // Create proxy actor with all dependencies injected 
+    let proxy = ProxyActor::new(
+        client_id, 
+        ws_server_url, 
+        session_token,
+        Some(registry.get_ref().clone()),
+        Some(active_connections.clone())
+    );
     
     // Start WebSocket connection
     ws::start(proxy, &req, stream)

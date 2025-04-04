@@ -101,7 +101,7 @@ The platform employs a structured message flow pattern:
 - [x] Enhance web-server to serve the Sploots React application
   - [x] Configure static asset serving with proper MIME types
   - [x] Set up SPA routing for client-side routing support
-  - [x] Implement compression for static assets
+  - [x] Implement compression for static assets 
 - [ ] Implement anonymous client ID generation
 - [ ] Add SIWE (Sign-In With Ethereum) flow endpoints:
   - [ ] `/auth/challenge`: Generate SIWE message with nonce

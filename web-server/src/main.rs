@@ -2,25 +2,16 @@
 mod proxy;
 mod auth;
 mod static_files;
+mod api;
+mod client_registry;
+mod middleware;
+mod utils;
 
-use actix_web::{web, App, HttpServer, Responder, HttpResponse, get, middleware::Compress};
+use actix::Actor;
+use actix_web::{web, App, HttpServer, middleware::{Compress, Logger}};
 use common::{setup_tracing, Config};
-use uuid::Uuid;
-
-#[get("/api")]
-async fn api_index() -> impl Responder {
-    HttpResponse::Ok().body("Agent Bridge Platform API")
-}
-
-#[get("/api/client")]
-async fn create_client() -> impl Responder {
-    // Generate a new UUID for anonymous client
-    let client_id = Uuid::new_v4();
-    
-    HttpResponse::Ok().json(serde_json::json!({
-        "client_id": client_id
-    }))
-}
+use client_registry::ClientRegistryActor;
+use middleware::RateLimiter;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -39,6 +30,13 @@ async fn main() -> std::io::Result<()> {
     tracing::info!("Starting Web Server on {}", server_addr);
     tracing::info!("Serving static files from: {:?}", static_config.root_path);
     
+    // Initialize ClientRegistryActor with a 24-hour session TTL
+    let client_registry = ClientRegistryActor::new()
+        .with_ttl(86400) // 24 hours in seconds
+        .with_cleanup_interval(3600) // Clean up expired sessions every hour
+        .start();
+    tracing::info!("ClientRegistryActor started");
+    
     // Log cache and compression settings
     if static_config.enable_compression {
         tracing::info!("Static assets compression: enabled");
@@ -49,8 +47,13 @@ async fn main() -> std::io::Result<()> {
     let cache_info = format!("Cache-Control: max-age={}", static_config.cache_control.max_age);
     tracing::info!("{}", cache_info);
     
-    // Create data reference
+    // Create rate limiter for client creation endpoint
+    let client_rate_limiter = RateLimiter::new(vec!["/api/client".to_string()]);
+    tracing::info!("Rate limiter configured for /api/client endpoint");
+    
+    // Create data references
     let config_data = web::Data::new(config);
+    let client_registry_data = web::Data::new(client_registry);
     let static_config_clone = static_config.clone();
     
     // Start HTTP server with conditional configuration based on compression setting
@@ -59,9 +62,11 @@ async fn main() -> std::io::Result<()> {
         HttpServer::new(move || {
             App::new()
                 .app_data(config_data.clone())
+                .app_data(client_registry_data.clone())
+                .wrap(Logger::default())
+                .wrap(client_rate_limiter.clone())
                 .wrap(Compress::default())
-                .service(api_index)
-                .service(create_client)
+                .configure(api::configure)
                 .configure(proxy::configure)
                 .configure(|cfg| {
                     static_files::configure(cfg, static_config_clone.clone());
@@ -75,8 +80,10 @@ async fn main() -> std::io::Result<()> {
         HttpServer::new(move || {
             App::new()
                 .app_data(config_data.clone())
-                .service(api_index)
-                .service(create_client)
+                .app_data(client_registry_data.clone())
+                .wrap(Logger::default())
+                .wrap(client_rate_limiter.clone())
+                .configure(api::configure)
                 .configure(proxy::configure)
                 .configure(|cfg| {
                     static_files::configure(cfg, static_config_clone.clone());
