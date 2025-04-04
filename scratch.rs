@@ -42,12 +42,12 @@ Phase 3 focuses on enhancing the web-server to serve the Sploots React applicati
 
 
 ### 3.2 Anonymous Client Management
-- [ ] Develop ClientRegistry service for tracking anonymous clients
-- [ ] Implement secure UUID generation for client identifiers
-- [ ] Add session persistence mechanisms (cookies/localStorage)
-- [ ] Create client session API endpoints
-- [ ] Implement anonymous session timeout and cleanup
-- [ ] Add metrics collection for client sessions
+- [x] Develop ClientRegistry service for tracking anonymous clients
+- [x]  Implement secure UUID generation for client identifiers
+- [x] Add session persistence mechanisms (cookies/localStorage)
+- [x] Create client session API endpoints
+- [x] Implement anonymous session timeout and cleanup
+- [x] Add metrics collection for client sessions
 
 ### 3.3 Web3 Authentication System
 - [ ] Create /auth/challenge endpoint with nonce generation
