@@ -21,6 +21,8 @@ pub struct ClientSession {
     pub wallet_address: Option<String>,
     /// Arbitrary session data
     pub metadata: HashMap<String, String>,
+    /// JWT token for authenticated clients
+    pub jwt_token: Option<String>,
 }
 
 impl ClientSession {
@@ -35,6 +37,7 @@ impl ClientSession {
             is_authenticated: false,
             wallet_address: None,
             metadata: HashMap::new(),
+            jwt_token: None,
         }
     }
     
@@ -65,6 +68,17 @@ impl ClientSession {
     /// Get metadata value
     pub fn get_metadata(&self, key: &str) -> Option<&String> {
         self.metadata.get(key)
+    }
+    /// Generate the JWT token from the wallet sign in 
+    pub fn generate_auth_token(&mut self, jwt_secret: &[u8]) -> Result<String, jsonwebtoken::errors::Error> {
+        if let Some(wallet) = &self.wallet_address {
+            let token = crate::utils::generate_jwt_token(&self.client_id, wallet, jwt_secret)?;
+            self.jwt_token = Some(token.clone());
+            self.update_activity();
+            Ok(token)
+        } else {
+            Err(jsonwebtoken::errors::ErrorKind::InvalidSubject.into())
+        }
     }
 }
 

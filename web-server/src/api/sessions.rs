@@ -5,6 +5,8 @@ use actix_web::cookie::time::Duration as CookieDuration;
 use common::models::session::{ClientSessionResponse, SessionResult};
 use serde_json::json;
 use uuid::Uuid;
+use serde::{Deserialize, Serialize};
+use jsonwebtoken::errors::Error as JwtError;
 use crate::client_registry::{
     ClientRegistryActor, 
     RegisterAnonymousClient, 
@@ -17,6 +19,35 @@ use crate::client_registry::{
 const SESSION_COOKIE_NAME: &str = "sploots_session";
 // Cookie max age in seconds (24 hours)
 const COOKIE_MAX_AGE: i64 = 86400;
+// Add JWT secret to configuration
+// This should be loaded from environment or config file
+const JWT_SECRET: &[u8] = b"your_jwt_secret_key_here";
+// ****************************
+// In web-server/src/main.rs or config.rs: 
+// pub fn get_jwt_secret() -> Vec<u8> {
+//     std::env::var("JWT_SECRET")
+//         .unwrap_or_else(|_| "insecure_default_only_for_development".to_string())
+//         .into_bytes()
+// }
+
+// // Then in sessions.rs
+// let jwt_secret = get_jwt_secret();
+// *****************************
+
+
+
+// Request structure for session upgrade
+#[derive(Deserialize)]
+pub struct UpgradeRequest {
+    pub wallet_address: String,
+}
+
+// Response structure for successful upgrade
+#[derive(Serialize)]
+pub struct UpgradeResponse {
+    pub status: String,
+    pub token: String,
+}
 
 #[get("/")]
 pub async fn api_index() -> impl Responder {
@@ -246,4 +277,64 @@ pub async fn invalidate_session(
             "error": "No session cookie found"
         }))
     }
+}
+
+// Session upgrade endpoint
+#[post("/sessions/upgrade")]
+pub async fn upgrade_session(
+    req: HttpRequest,
+    data: web::Json<UpgradeRequest>,
+    registry: web::Data<Addr<ClientRegistryActor>>,
+) -> impl Responder {
+    // 1. Extract client ID from existing session cookie
+    if let Some(cookie) = req.cookie("sploots_session") {
+        let session_token = cookie.value().to_string();
+        
+        // 2. Upgrade session with wallet address
+        match registry.send(UpdateClientSession {
+            session_token,
+            is_authenticated: Some(true),
+            wallet_address: Some(Some(data.wallet_address.clone())),
+            metadata: None,
+            extend_ttl: true,
+        }).await {
+            Ok(SessionResult::Success(mut session)) => {
+                // 3. Generate JWT for WebSocket auth
+                match session.generate_auth_token(JWT_SECRET) {
+                    Ok(token) => {
+                        // 4. Return token
+                        return HttpResponse::Ok().json(UpgradeResponse {
+                            status: "success".to_string(),
+                            token,
+                        });
+                    },
+                    Err(_) => {
+                        return HttpResponse::InternalServerError().json(json!({
+                            "error": "Failed to generate authentication token"
+                        }));
+                    }
+                }
+            },
+            Ok(SessionResult::Expired) => {
+                return HttpResponse::Unauthorized().json(json!({
+                    "error": "Session expired"
+                }));
+            },
+            Ok(_) => {
+                return HttpResponse::Unauthorized().json(json!({
+                    "error": "Invalid session"
+                }));
+            },
+            Err(e) => {
+                tracing::error!("Error upgrading session: {}", e);
+                return HttpResponse::InternalServerError().json(json!({
+                    "error": "Internal server error"
+                }));
+            }
+        }
+    }
+    
+    HttpResponse::Unauthorized().json(json!({
+        "error": "No session cookie found"
+    }))
 }
