@@ -96,16 +96,16 @@ The platform employs a structured message flow pattern:
 - [x] Add heartbeat mechanism (5s intervals, 30s timeout)
 - [x] Implement reconnection with exponential backoff
 
-### Phase 3: Web Application Integration & Authentication
+### Phase 3: Web Application Integration & Basic Authentication
 - [x]        **In Progress**
 - [x] Enhance web-server to serve the Sploots React application
   - [x] Configure static asset serving with proper MIME types
   - [x] Set up SPA routing for client-side routing support
   - [x] Implement compression for static assets 
 - [x] Implement anonymous client ID generation
-- [ ] Add SIWE (Sign-In With Ethereum) flow endpoints:
-  - [ ] `/auth/challenge`: Generate SIWE message with nonce
-  - [ ] `/auth/verify`: Verify signature and issue JWT
+- [ ] Implement basic wallet connectivity:
+  - [ ] Create session upgrade endpoint to receive wallet address
+  - [ ] Issue JWT for authenticated sessions
 - [ ] Implement JWT validation middleware
 - [ ] Create session upgrade mechanism to associate wallet addresses
 - [ ] Update state management to track authenticated sessions
@@ -118,7 +118,10 @@ The platform employs a structured message flow pattern:
 - [ ] Create structured logging for message flow tracing
 - [ ] Add support for structured message types from the Sploots application
 
-### Phase 5: State Management
+### Phase 5: Advanced Authentication & State Management
+- [ ] Implement full SIWE (Sign-In With Ethereum) flow:
+  - [ ] `/auth/challenge`: Generate SIWE message with nonce
+  - [ ] `/auth/verify`: Verify signature and issue JWT
 - [ ] Enhance `StateManagerActor` with persistence hooks
 - [ ] Add metrics collection for connections and message throughput
 - [ ] Implement state snapshots for recovery
