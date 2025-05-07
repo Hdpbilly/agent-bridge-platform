@@ -50,10 +50,10 @@ Phase 3 focuses on enhancing the web-server to serve the Sploots React applicati
 - [x] Add metrics collection for client sessions
 
 ### 3.3 Simplified Wallet Authentication System
-- [ ] Add JWT token utilities to common crate
-- [ ] Update ClientSession model to support wallet addresses and JWT tokens
-- [ ] Create session upgrade endpoint for wallet address association
-- [ ] Implement JWT generation with proper claims
+- [x] Add JWT token utilities to common crate
+- [x] Update ClientSession model to support wallet addresses and JWT tokens
+- [x] Create session upgrade endpoint for wallet address association
+- [x] Implement JWT generation with proper claims
 - [ ] Add JWT validation middleware
 - [ ] Create secure token storage mechanisms
 - [ ] Implement session upgrade for anonymous clients
