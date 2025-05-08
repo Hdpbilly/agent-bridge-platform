@@ -17,6 +17,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::convert::TryFrom;
 use tungstenite::protocol::frame::coding::CloseCode as TungsteniteCloseCode;
+// use common::utils::jwt;
 
 use crate::client_registry::{ClientRegistryActor, GetClientSession, UpdateSessionActivity};
 
@@ -411,6 +412,37 @@ async fn ws_route(
     
     // Get session token from cookie
     let session_token = req.cookie("sploots_session").map(|c| c.value().to_string());
+
+        // Check for JWT in Authorization header
+        let mut authenticated_with_jwt = false;
+        if let Some(auth_header) = req.headers().get("Authorization") {
+            if let Ok(auth_str) = auth_header.to_str() {
+                if auth_str.starts_with("Bearer ") {
+                    let token = &auth_str[7..]; // Skip "Bearer "
+                    
+                    // Validate JWT
+                    match common::utils::validate_jwt_token(token, b"your_jwt_secret_key_here") {
+                        Ok((token_client_id, _wallet_address)) => {
+                            // Verify client ID matches token
+                            if token_client_id == client_id {
+                                authenticated_with_jwt = true;
+                                tracing::info!("Client {} authenticated with JWT", client_id);
+                            } else {
+                                tracing::warn!(
+                                    "JWT client ID mismatch: token has {}, request for {}", 
+                                    token_client_id, client_id
+                                );
+                                return Ok(HttpResponse::Forbidden().finish());
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!("Invalid JWT for client {}: {}", client_id, e);
+                            // We'll continue without authentication
+                        }
+                    }
+                }
+            }
+        }
     
     // Validate session if token is present
     if let Some(token) = &session_token {

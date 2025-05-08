@@ -8,5 +8,7 @@ pub fn configure(cfg: &mut actix_web::web::ServiceConfig) {
             .service(sessions::create_client)
             .service(sessions::get_client_info)
             .service(sessions::invalidate_session)
+            .service(sessions::upgrade_session)
+            .service(sessions::protected_endpoint)
     );
 }

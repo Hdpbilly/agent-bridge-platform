@@ -12,7 +12,8 @@ use crate::client_registry::{
     RegisterAnonymousClient, 
     GetClientSession,
     GetClientSessionById,
-    InvalidateClientSession
+    InvalidateClientSession,
+    UpdateClientSession
 };
 
 // Cookie name for session tracking
@@ -290,7 +291,7 @@ pub async fn upgrade_session(
     if let Some(cookie) = req.cookie("sploots_session") {
         let session_token = cookie.value().to_string();
         
-        // 2. Upgrade session with wallet address
+        // 2. Upgrade session with wallet address n  NEED TO CHECK THIS UPDATE AS IT SEESM THAT IT IS NOT CORRECTLY UTILIZING THE ALREADY DEFINED TYPES 
         match registry.send(UpdateClientSession {
             session_token,
             is_authenticated: Some(true),
@@ -337,4 +338,50 @@ pub async fn upgrade_session(
     HttpResponse::Unauthorized().json(json!({
         "error": "No session cookie found"
     }))
+}
+
+// Add to web-server/src/api/sessions.rs
+
+// JWT validation middleware
+fn validate_jwt(req: &HttpRequest) -> Result<(Uuid, String), HttpResponse> {
+    if let Some(auth_header) = req.headers().get("Authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if auth_str.starts_with("Bearer ") {
+                let token = &auth_str[7..]; // Skip "Bearer "
+                match common::utils::validate_jwt_token(token, JWT_SECRET) {
+                    Ok((client_id, wallet_address)) => {
+                        return Ok((client_id, wallet_address));
+                    },
+                    Err(e) => {
+                        tracing::warn!("JWT validation failed: {}", e);
+                        return Err(HttpResponse::Unauthorized().json(json!({
+                            "error": "Invalid token"
+                        })));
+                    }
+                }
+            }
+        }
+    }
+    
+    Err(HttpResponse::Unauthorized().json(json!({
+        "error": "Authorization header missing or invalid"
+    })))
+}
+
+// Test endpoint for JWT validation
+#[get("/protected")]
+pub async fn protected_endpoint(
+    req: HttpRequest,
+) -> impl Responder {
+    match validate_jwt(&req) {
+        Ok((client_id, wallet_address)) => {
+            HttpResponse::Ok().json(json!({
+                "status": "success",
+                "message": "Authenticated access granted",
+                "client_id": client_id,
+                "wallet_address": wallet_address
+            }))
+        },
+        Err(response) => response
+    }
 }

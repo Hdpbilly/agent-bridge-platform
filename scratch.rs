@@ -56,8 +56,8 @@ Phase 3 focuses on enhancing the web-server to serve the Sploots React applicati
 - [x] Implement JWT generation with proper claims
 - [ ] Add JWT validation middleware
 - [ ] Create secure token storage mechanisms
-- [ ] Implement session upgrade for anonymous clients
-- [ ] Add wallet address association with client sessions
+- [x] Implement session upgrade for anonymous clients
+- [x] Add wallet address association with client sessions
 
 ### 3.4 WebSocket Authentication Integration
 - [ ] Enhance ProxyActor with authentication state
